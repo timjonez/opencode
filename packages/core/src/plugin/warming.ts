@@ -13,9 +13,12 @@ const decodeWarming = Schema.decodeUnknownOption(ConfigWarming.Warming)
 
 const defaults = {
   prompt: "This is a keep-alive request. Do not perform any work or use tools. Reply with exactly: OK",
-  interval: Duration.minutes(4),
+  interval: "auto" as "auto" | Duration.Duration,
   duration: Duration.minutes(30),
 }
+
+// The interval for "auto" when the model has no cache.ttl, a little under the five minutes most explicit caches last.
+const fallbackInterval = Duration.minutes(4)
 
 export const Plugin = define({
   id: "opencode.warming",
@@ -38,10 +41,10 @@ export const Plugin = define({
         ...(typeof global === "object" ? global : {}),
         ...(typeof local === "object" ? local : {}),
       }
-      const interval = settings.interval === "auto" ? autoInterval(cache?.ttl) : settings.interval
-      // "auto" doesn't warm a model without a cache.ttl.
-      if (interval === undefined) return
       const { duration } = settings
+      const interval = settings.interval === "auto" ? (autoInterval(cache?.ttl) ?? fallbackInterval) : settings.interval
+      // A cache that outlives the window, such as "1h" with the 30-minute default, needs no keep-alive.
+      if (settings.interval === "auto" && Duration.isFinite(duration) && Duration.isGreaterThanOrEqualTo(interval, duration)) return
       const valid =
         Duration.isFinite(duration) &&
         Duration.isGreaterThan(interval, Duration.zero) &&
@@ -54,7 +57,10 @@ export const Plugin = define({
     })
 
     const scope = yield* Scope.Scope
-    const sessions = new Map<Session.ID, { last: number; expires: number; settings: typeof defaults }>()
+    const sessions = new Map<
+      Session.ID,
+      { last: number; expires: number; settings: typeof defaults & { interval: Duration.Duration } }
+    >()
     // A ping during a model request would compete with the request it keeps warm, which stalls single-slot local models.
     // A request counts from its context hook, because `session.step.started` waits for the first response chunk.
     const requesting = new Set<Session.ID>()
